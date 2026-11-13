@@ -21,7 +21,10 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    # 必须用 macOS 26 / Xcode 26：源码里的 Network framework 用到了
+    # NWPath.isUltraConstrained（iOS 26 新增），旧 SDK 会直接报 Swift 编译错误。
+    # macos-15 自带 Xcode 16（iOS 18 SDK），编不过。
+    runs-on: macos-26
     timeout-minutes: 120
 
     env:
@@ -58,6 +61,10 @@ jobs:
           flutter --version
           xcodebuild -version
           pod --version
+          echo "--- 可用 Xcode ---"
+          ls /Applications | grep -i xcode || true
+          echo "--- iOS SDK ---"
+          xcodebuild -showsdks 2>/dev/null | grep -i iphoneos || true
           cd src && (rustup show || true)
 
       - name: Patch entitlements
