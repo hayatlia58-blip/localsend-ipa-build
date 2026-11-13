@@ -1,0 +1,172 @@
+name: Build LocalSend unsigned IPA
+
+# 仓库页面 Actions 标签 -> Build LocalSend unsigned IPA -> Run workflow
+# 产物是未签名 ipa，需自行签名后安装。
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'LocalSend 源码 tag（建议填稳定版，如 v1.18.2；留 main 有编不过的风险）'
+        required: false
+        default: 'v1.18.2'
+      profile:
+        description: '产物预设'
+        required: true
+        type: choice
+        default: sideload
+        options:
+          - sideload
+          - trollstore
+          - developers
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    env:
+      # sideload     = 清空 entitlements + 移除 ShareExtension，任何证书都最容易签过
+      # trollstore   = 保留原样（ldid 签名不吃证书，也不需要 App Group 授权）
+      # developers   = 清空 entitlements，保留 ShareExtension（自己配好 App ID / App Group）
+      PROFILE_KIND: ${{ inputs.profile }}
+
+    steps:
+      - name: Checkout LocalSend source
+        uses: actions/checkout@v4
+        with:
+          repository: localsend/localsend
+          ref: ${{ inputs.ref }}
+          path: src
+
+      - name: Show build context
+        run: |
+          cd src
+          git log -1 --format='commit  %H%n date    %ci%n subject %s'
+          echo "--- .fvmrc ---"
+          cat .fvmrc
+          echo "--- profile: $PROFILE_KIND ---"
+
+      - name: Set up Flutter (version pinned by .fvmrc)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: src/.fvmrc
+          channel: stable
+          cache: true
+
+      - name: Toolchain versions
+        run: |
+          flutter --version
+          xcodebuild -version
+          pod --version
+          cd src && (rustup show || true)
+
+      - name: Patch entitlements
+        if: ${{ inputs.profile != 'trollstore' }}
+        run: |
+          set -euo pipefail
+          cd src/app/ios
+          for f in Runner/Runner.entitlements ShareExtension/ShareExtension.entitlements; do
+            echo "=== before: $f ==="
+            cat "$f" 2>/dev/null || echo "(not found)"
+            cp "$f" "$f.orig" 2>/dev/null || true
+          done
+
+          MINIMAL="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>"
+          printf '%b\n' "$MINIMAL" > Runner/Runner.entitlements
+          printf '%b\n' "$MINIMAL" > ShareExtension/ShareExtension.entitlements
+
+          echo "=== after ==="
+          cat Runner/Runner.entitlements
+          cat ShareExtension/ShareExtension.entitlements
+
+      - name: Install dependencies
+        run: |
+          cd src/app
+          flutter pub get
+
+      - name: Build iOS app without code signing
+        run: |
+          cd src/app
+          flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="src/app/build/ios/iphoneos/Runner.app"
+          test -d "$APP" || { echo "::error::构建产物不存在，往上翻 flutter build 日志"; exit 1; }
+
+          echo "=== app bundle ==="
+          du -sh "$APP"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist" || true
+
+          echo "=== 内置扩展 ==="
+          ls -1 "$APP/PlugIns" 2>/dev/null || echo "(无 PlugIns 目录)"
+
+          # sideload 预设下移除 ShareExtension：
+          # 扩展是独立二进制，需要单独的 App ID + provisioning profile，
+          # 且它声明的 App Group 普通证书无法授权，保留会让签名直接失败。
+          # 代价仅是失去「从其他 App 分享文件到 LocalSend」这一入口，主功能不受影响。
+          if [ "$PROFILE_KIND" = "sideload" ]; then
+            if [ -d "$APP/PlugIns/ShareExtension.appex" ]; then
+              echo "移除 ShareExtension.appex（sideload 预设）"
+              rm -rf "$APP/PlugIns/ShareExtension.appex"
+              rmdir "$APP/PlugIns" 2>/dev/null || true
+            fi
+          fi
+
+          echo "=== 签名状态（未签名属正常）==="
+          codesign -dv "$APP" 2>&1 | head -3 || echo "unsigned (expected)"
+
+          rm -rf Payload LocalSend.ipa
+          mkdir -p Payload
+          # -R 保留 Frameworks 内的符号链接
+          cp -R "$APP" Payload/
+          IPA="LocalSend-$PROFILE_KIND-unsigned.ipa"
+          # -y 保留符号链接，-r 递归
+          zip -qry "$IPA" Payload
+
+          echo "=== IPA ==="
+          ls -lh "$IPA"
+          unzip -l "$IPA" | head -12
+
+      - name: Write build notes into artifact
+        run: |
+          OUT="BUILD-INFO.txt"
+          {
+            echo "LocalSend 未签名 IPA"
+            echo "----------------------------------------"
+            echo "源码版本  : ${{ inputs.ref }}"
+            echo "产物预设  : $PROFILE_KIND"
+            echo "构建时间  : $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "Flutter   : $(flutter --version | head -1)"
+            echo "Xcode     : $(xcodebuild -version | head -1)"
+            echo ""
+            echo "预设含义"
+            echo "  sideload    entitlements 已清空，ShareExtension 已移除"
+            echo "              任何证书 / 代签服务都最容易签过"
+            echo "              代价：失去「其他 App 分享到 LocalSend」入口"
+            echo "  developers  entitlements 已清空，ShareExtension 保留"
+            echo "              需自行签名两个二进制，并为扩展创建 App ID"
+            echo "  trollstore  entitlements 原样保留，ShareExtension 保留"
+            echo "              仅供 TrollStore 安装，不走证书签名流程"
+            echo ""
+            echo "签名提醒"
+            echo "  未签名 ipa 必须签名后才能安装。签名证书若不含"
+            echo "  com.apple.developer.networking.multicast（需 Apple 单独审批），"
+            echo "  mDNS 自动发现不会工作，请在电脑端用「手动输入 IP」发送。"
+            echo "  默认端口 TCP 53317。"
+          } > "$OUT"
+          cat "$OUT"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalSend-${{ inputs.profile }}-unsigned-ipa-${{ inputs.ref }}
+          path: |
+            LocalSend-${{ inputs.profile }}-unsigned.ipa
+            BUILD-INFO.txt
+          retention-days: 7
+          if-no-files-found: error
