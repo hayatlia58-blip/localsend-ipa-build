@@ -2,6 +2,22 @@
 
 给需要自己签名的场景用。产物是**未签名 ipa**，签名方式你自定。
 
+> **已实际构建成功**（2026-11-13）
+>
+> | 项目 | 值 |
+> |---|---|
+> | 仓库 | https://github.com/hayatlia58-blip/localsend-ipa-build |
+> | 源码 | `v1.18.2` |
+> | 预设 | `sideload` |
+> | 工具链 | Xcode 26.6 / Flutter 3.41.9 |
+> | 耗时 | 12 分 41 秒 |
+> | 产物 | `LocalSend-1.18.2-unsigned.ipa`，25.7 MB |
+> | SHA256 | `96b5219871b38856a68c7c2aafab65e1c5ac165c357b197287b9a9c3112ff2d2` |
+>
+> 验证：Bundle ID `org.localsend.localsendApp`、版本 1.18.2 (64)、arm64、`cryptid=0`（未加密，可签名）、ShareExtension 已移除。
+>
+> **必须用 `macos-26` runner**，原因见文末「已踩过的坑」。
+
 ---
 
 ## 一、签名前必须知道的三个事实
@@ -154,6 +170,7 @@ LocalSend 会请求「本地网络」权限，**必须点允许**。路径：
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| `Swift Compiler Error: Value of type 'NWPath' has no member 'isUltraConstrained'` | runner 的 Xcode 太旧，缺 iOS 26 SDK 的新 API | `runs-on: macos-26`（**已踩过，这是最初失败的原因**） |
 | `pub get` 报 SDK 版本不符 | Flutter 版本与 runner 不匹配 | 工作流已按 `.fvmrc` 自动取版本；仍失败就把 `flutter-version-file` 换成硬编码版本号 |
 | `xcodebuild` 报 Xcode 不兼容 | Flutter 与默认 Xcode 版本错位 | 在 `Toolchain versions` 步骤看实际版本，必要时用 `sudo xcode-select -s` 切 Xcode |
 | `Runner.app` 不存在 | 更早阶段就挂了 | 看 `Build iOS app without code signing` 的完整日志 |
@@ -173,6 +190,32 @@ LocalSend 会请求「本地网络」权限，**必须点允许**。路径：
 
 ---
 
-## 八、合规
+## 八、已踩过的坑（真实记录）
+
+### 1. macOS runner 版本不对，Xcode 编译直接失败
+
+第一版用 `macos-15`，跑到编译阶段报：
+
+```
+Swift Compiler Error (Xcode): Value of type 'NWPath' has no member 'isUltraConstrained'
+```
+
+`NWPath.isUltraConstrained` 是 iOS 26 的 Network framework 新增 API，`macos-15` 自带 Xcode 16（iOS 18 SDK），没有这个符号。换成 `macos-26`（自带 Xcode 26.6）后一次通过，全程 12 分 41 秒。
+
+### 2. workflow 里不能用顶格的 heredoc
+
+`run: |` 是 YAML block scalar，内容必须保持缩进。写 `cat > file <<EOF` 时如果 heredoc 正文顶格，会提前终止 scalar，整个 workflow 解析失败。改用 `{ echo ...; } > file` 的形式。
+
+### 3. 公开仓库跑 macOS runner 才免费
+
+私有仓库的 macOS runner 按 **10 倍**消耗 Action 分钟数。免费账号每月 2000 分钟，一次 13 分钟的构建约吃掉 130 分钟额度。公开仓库完全免费，所以本仓库设为 public —— 里面只有构建配置，没有个人信息。
+
+### 4. 注意 Flutter 版本随 tag 变化
+
+`v1.18.2` 的 `.fvmrc` 是 **3.41.9**，而 `main` 上是 3.47.9。工作流按 checkout 下来的 `.fvmrc` 取版本，所以用 tag 构建时 Flutter 版本和 main 不同，这是正常的。
+
+---
+
+## 九、合规
 
 LocalSend 是 Apache-2.0，编译、修改、自用、再分发都允许。再分发保留版权声明和 LICENSE。不要用 "LocalSend" 名称和图标做自己的发行版（商标不在授权范围内）。
